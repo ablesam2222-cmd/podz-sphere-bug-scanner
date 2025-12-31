@@ -65,7 +65,7 @@ pkg install python git -y
 ```
 3. Clone the repository
 ```bash
-git clone https://github.com/ablesam2222-cmd/PodzSphereBugScanner.git
+git clone https://github.com/ablesam2222-cmd/podz-sphere-bug-scanner.git
 cd PodzSphereBugScanner
 ```
 4. Install Python dependencies
