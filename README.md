@@ -7,7 +7,7 @@ which domains deliver **real HTTP traffic** when a mobile SIM card has
 The tool is optimized for **Android devices using Termux** and focuses on
 accuracy, simplicity, and real-world ISP behavior.
 
-> ⚠️ This tool **is created for teaching Papua New Guineans hoe to do there own Host hunting**.  
+> ⚠️ This tool **is created for teaching Papua New Guineans how to do there own bug host hunting, basically sni hunting**.  
 > It only detects domains that are already accessible (zero-rated or whitelisted).
 
 ---
@@ -63,11 +63,36 @@ Download and install **Termux from F-Droid**.
 pkg update && pkg upgrade -y
 pkg install python git -y
 ```
+3. Clone the repository
 ```bash
 git clone https://github.com/ablesam2222-cmd/PodzSphereBugScanner.git
 cd PodzSphereBugScanner
 ```
+4. Install Python dependencies
 ```bash
 pip install -r requirements.txt
 ```
+▶️ Usage
+1. Create a domain list
+Create a text file with one domain per line:
 ```bash
+nano domains.txt
+```
+Example content
+`
+google.com
+m.facebook.com
+wikipedia.org
+vodafone.com.pg
+`
+Save and exit:
+CTRL + O → ENTER → CTRL + X
+
+### Run the scanner
+
+```bash
+python podz_sphere_scanner.py
+```
+ Then enter the domain list name you just made and watch the magic.
+
+Join me on telegram https://t.me/podzsphere
