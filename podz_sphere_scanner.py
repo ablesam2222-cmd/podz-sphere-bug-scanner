@@ -1,170 +1,145 @@
 #!/usr/bin/env python3
 """
-Podz Sphere Zero-Balance Scanner
-Optimized for zero data balance SIM cards with minimal data usage
+Podz Sphere Zero-Rated Host Detector
+Detects ALL accessible sites with 0MB balance (including blank/empty pages)
 """
 
 import os
 import sys
 import time
-import socket
 import json
-import requests
+import socket
 from datetime import datetime
-import threading
-import queue
-import signal
 
-# ===================== ZERO-BALANCE CONFIG =====================
+# Try to import requests, fallback to urllib
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+    import urllib.request
+    import ssl
+
+# ===================== CONFIG =====================
 CONFIG = {
-    "MAX_DATA_USAGE": 1024 * 10,  # 10KB maximum per scan (zero balance safety)
-    "TIMEOUT": 3,  # Shorter timeout to save data
-    "MAX_CONCURRENT": 1,  # Sequential scanning for data control
-    "STATE_FILE": ".zscan_state",
-    "RESULTS_FILE": "zscan_results.txt",
+    "TIMEOUT": 6,
+    "MAX_DOWNLOAD": 5120,  # Only 5KB max download for checking
+    "STATE_FILE": ".zero_host_state",
+    "RESULTS_FILE": "zero_hosts.txt",
+    "CATEGORIES_FILE": "host_categories.txt",
     "HEADERS": {
-        "User-Agent": "Mozilla/5.0 (Linux; U; Android 4.4.2; en-US; HM NOTE 1W Build/KOT49H) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 UCBrowser/11.0.5.850 U3/0.8.0 Mobile Safari/534.30",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate",
-        "Connection": "close",  # Close connection to save data
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10)",
+        "Accept": "*/*",
+        "Connection": "close",
         "Cache-Control": "no-cache"
-    },
-    "CHUNK_SIZE": 512,  # Read only first 512 bytes to save data
+    }
 }
 
 # ===================== COLORS =====================
-G = "\033[92m"  # Green
-Y = "\033[93m"  # Yellow
-C = "\033[96m"  # Cyan
-R = "\033[91m"  # Red
-M = "\033[95m"  # Magenta
-B = "\033[94m"  # Blue
-W = "\033[97m"  # White
-D = "\033[90m"  # Gray/Dark
-BOLD = "\033[1m"
-UL = "\033[4m"
-RST = "\033[0m"
+class Colors:
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    CYAN = "\033[96m"
+    RED = "\033[91m"
+    BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
+    WHITE = "\033[97m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
 
-# ===================== DATA COUNTER =====================
-class DataCounter:
-    """Track data usage to prevent exceeding zero balance"""
-    def __init__(self):
-        self.bytes_used = 0
-        self.requests_made = 0
-        self.start_time = time.time()
-    
-    def add_bytes(self, bytes_count):
-        """Add bytes to counter"""
-        self.bytes_used += bytes_count
-        self.requests_made += 1
-        
-        # Check if we're approaching limit
-        if self.bytes_used > CONFIG["MAX_DATA_USAGE"]:
-            print(f"\n{R}⚠ DATA LIMIT REACHED!{RST}")
-            print(f"{Y}Used: {self.bytes_used/1024:.1f}KB of {CONFIG['MAX_DATA_USAGE']/1024:.1f}KB{RST}")
-            return False
-        return True
-    
-    def get_stats(self):
-        """Get usage statistics"""
-        elapsed = time.time() - self.start_time
-        return {
-            "bytes": self.bytes_used,
-            "requests": self.requests_made,
-            "time": elapsed,
-            "avg_per_request": self.bytes_used / max(1, self.requests_made)
-        }
+# ===================== UTILITIES =====================
+def clear_screen():
+    os.system('clear')
 
-# ===================== ZERO BALANCE CHECK =====================
-def check_zero_balance_mode():
-    """Verify device is in zero balance mode"""
-    print(f"\n{Y}📱 ZERO BALANCE MODE CHECK{RST}")
-    print(f"{D}──────────────────────────{RST}")
-    
-    checks = [
-        ("Mobile Data", "ON"),
-        ("Wi-Fi", "OFF"),
-        ("SIM Balance", "0 MB"),
-        ("Battery Optimization", "OFF"),
-        ("Airplane Mode", "OFF")
-    ]
-    
-    for check, required in checks:
-        print(f"  {G}✓{RST} {check}: {required}")
-    
-    print(f"\n{Y}⚠ IMPORTANT:{RST}")
-    print(f"  • This scanner uses minimal data")
-    print(f"  • Maximum: {CONFIG['MAX_DATA_USAGE']/1024:.1f}KB per session")
-    print(f"  • Stops automatically if data limit reached")
-    
-    input(f"\n{Y}Press ENTER to continue...{RST}")
+def show_banner():
+    clear_screen()
+    banner = f"""{Colors.CYAN}{Colors.BOLD}
+╔══════════════════════════════════════════════╗
+║     PODZ SPHERE ZERO-RATED HOST DETECTOR     ║
+║    Captures ALL accessible hosts at 0MB      ║
+║      @astp2019 on tg                         ║
+╚══════════════════════════════════════════════╝{Colors.RESET}
+"""
+    print(banner)
 
 # ===================== DOMAIN LOADER =====================
-def get_domain_file():
-    """Ask user for domain list file"""
-    print(f"\n{C}📁 SELECT DOMAIN LIST{RST}")
-    print(f"{D}───────────────────{RST}")
+def load_domain_file():
+    """Ask user for domain file and load domains"""
+    print(f"\n{Colors.CYAN}[*] Available .txt files:{Colors.RESET}")
     
-    # Show available .txt files
+    # List all txt files
     txt_files = [f for f in os.listdir('.') if f.endswith('.txt')]
     
-    if txt_files:
-        print(f"{G}Available files:{RST}")
-        for i, file in enumerate(txt_files, 1):
-            size = os.path.getsize(file)
-            print(f"  {i}. {file} ({size/1024:.1f}KB)")
+    if not txt_files:
+        print(f"{Colors.RED}[!] No .txt files found{Colors.RESET}")
+        print(f"{Colors.YELLOW}[*] Create a file with domains (one per line){Colors.RESET}")
+        return None, None
+    
+    for i, file in enumerate(txt_files, 1):
+        size = os.path.getsize(file)
+        print(f"  {i}. {file} ({size} bytes)")
     
     while True:
-        print(f"\n{Y}Enter filename (or drag & drop file):{RST} ", end='')
-        filename = input().strip()
-        
-        # Remove quotes if user drags and drops
-        filename = filename.strip('\'"')
-        
-        if not filename:
-            print(f"{R}❌ No filename entered{RST}")
-            continue
-        
-        # Add .txt extension if missing
-        if not filename.endswith('.txt'):
-            filename += '.txt'
-        
-        if os.path.exists(filename):
-            # Count lines
-            with open(filename, 'r') as f:
-                lines = [line.strip() for line in f if line.strip()]
-                domains = [line for line in lines if not line.startswith('#')]
+        try:
+            choice = input(f"\n{Colors.YELLOW}[?] Select file number or enter filename: {Colors.RESET}").strip()
             
-            print(f"{G}✓ Loaded {len(domains)} domains{RST}")
-            return filename, domains
-        else:
-            print(f"{R}❌ File not found: {filename}{RST}")
-            print(f"{Y}Create a .txt file with one domain per line{RST}")
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(txt_files):
+                    filename = txt_files[idx]
+                else:
+                    print(f"{Colors.RED}[!] Invalid number{Colors.RESET}")
+                    continue
+            else:
+                filename = choice
+                if not filename.endswith('.txt'):
+                    filename += '.txt'
+            
+            if not os.path.exists(filename):
+                print(f"{Colors.RED}[!] File not found: {filename}{Colors.RESET}")
+                continue
+            
+            # Load domains
+            with open(filename, 'r') as f:
+                domains = []
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        # Clean domain
+                        domain = line.replace('http://', '').replace('https://', '').split('/')[0]
+                        # Remove port if present
+                        domain = domain.split(':')[0]
+                        domains.append(domain.strip())
+            
+            print(f"{Colors.GREEN}[✓] Loaded {len(domains)} hosts from {filename}{Colors.RESET}")
+            return domains, filename
+            
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}[!] Cancelled{Colors.RESET}")
+            return None, None
+        except Exception as e:
+            print(f"{Colors.RED}[!] Error: {e}{Colors.RESET}")
 
-# ===================== STATE MANAGEMENT =====================
-class ZeroBalanceState:
-    """Manage state for zero-balance scanning"""
-    
+# ===================== STATE MANAGER =====================
+class StateManager:
     @staticmethod
-    def save(domains, current_index, found):
+    def save_state(current_index, accessible_hosts, total_hosts):
         """Save scan progress"""
         state = {
-            "timestamp": datetime.now().isoformat(),
-            "total_domains": len(domains),
             "current_index": current_index,
-            "found_domains": found,
-            "data_used": 0
+            "accessible_hosts": accessible_hosts,
+            "total_hosts": total_hosts,
+            "timestamp": datetime.now().isoformat()
         }
         try:
             with open(CONFIG["STATE_FILE"], 'w') as f:
-                json.dump(state, f)
+                json.dump(state, f, indent=2)
             return True
         except:
             return False
     
     @staticmethod
-    def load():
+    def load_state():
         """Load scan progress"""
         if not os.path.exists(CONFIG["STATE_FILE"]):
             return None
@@ -176,367 +151,561 @@ class ZeroBalanceState:
             return None
     
     @staticmethod
-    def clear():
+    def clear_state():
         """Clear scan state"""
         if os.path.exists(CONFIG["STATE_FILE"]):
             os.remove(CONFIG["STATE_FILE"])
-    
-    @staticmethod
-    def delete():
-        """Delete state file"""
-        if os.path.exists(CONFIG["STATE_FILE"]):
-            os.remove(CONFIG["STATE_FILE"])
 
-# ===================== MINIMAL SCANNER =====================
-class ZeroBalanceScanner:
-    """Ultra-light scanner for zero data balance"""
-    
+# ===================== HOST DETECTOR ENGINE =====================
+class ZeroHostDetector:
     def __init__(self):
-        self.data_counter = DataCounter()
-        self.found_domains = []
-        self.session = requests.Session()
-        self.session.headers.update(CONFIG["HEADERS"])
-        self.session.max_redirects = 1  # Limit redirects to save data
-    
-    def minimal_request(self, domain):
-        """Make minimal HTTP request to save data"""
-        url = f"http://{domain}"
+        self.accessible_hosts = []  # All hosts that respond
+        self.categorized_hosts = {
+            "full_sites": [],      # ≥15KB content
+            "medium_sites": [],    # 5KB - 15KB
+            "small_sites": [],     # 1KB - 5KB
+            "empty_sites": [],     # <1KB or blank
+            "error_pages": [],     # HTTP errors but responsive
+            "port_only": []        # Only ports open, no HTTP
+        }
+        self.data_used = 0
+        self.total_tested = 0
         
+    def check_port(self, host, port):
+        """Check if port is open (fastest check)"""
         try:
-            # Start timing
-            start_time = time.time()
-            
-            # Make HEAD request first (uses less data)
-            try:
-                response = self.session.head(
-                    url,
-                    timeout=CONFIG["TIMEOUT"],
-                    allow_redirects=False
-                )
-                
-                # Calculate data used (estimate)
-                data_used = len(str(response.headers)) + 200  # Approx header size
-                
-                # Check if HEAD was successful
-                if response.status_code < 400:
-                    if self.data_counter.add_bytes(data_used):
-                        response_time = (time.time() - start_time) * 1000
-                        return {
-                            "domain": domain,
-                            "status": response.status_code,
-                            "time": response_time,
-                            "data": data_used,
-                            "method": "HEAD"
-                        }
-                
-            except:
-                pass
-            
-            # If HEAD failed, try minimal GET
-            try:
-                response = self.session.get(
-                    url,
-                    timeout=CONFIG["TIMEOUT"],
-                    stream=True,
-                    allow_redirects=True
-                )
-                
-                # Read only first CHUNK_SIZE bytes
-                content_bytes = b""
-                for chunk in response.iter_content(chunk_size=CONFIG["CHUNK_SIZE"]):
-                    content_bytes += chunk
-                    if len(content_bytes) >= CONFIG["CHUNK_SIZE"]:
-                        break
-                
-                response.close()
-                
-                # Calculate data used
-                data_used = len(str(response.headers)) + len(content_bytes) + 200
-                
-                if self.data_counter.add_bytes(data_used):
-                    response_time = (time.time() - start_time) * 1000
-                    return {
-                        "domain": domain,
-                        "status": response.status_code,
-                        "time": response_time,
-                        "data": data_used,
-                        "method": "GET",
-                        "size": len(content_bytes)
-                    }
-                    
-            except Exception as e:
-                pass
-            
-            return None
-            
-        except Exception as e:
-            return None
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
+        except:
+            return False
     
-    def scan_domain(self, domain):
-        """Scan single domain with zero-balance optimization"""
-        result = self.minimal_request(domain)
+    def test_host_minimal(self, host):
+        """Test host with minimal HTTP request"""
+        results = {
+            "host": host,
+            "http_port": False,
+            "https_port": False,
+            "http_response": None,
+            "https_response": None,
+            "content_size": 0,
+            "status_code": 0,
+            "final_url": "",
+            "error": None
+        }
         
-        if result:
-            status = result["status"]
-            
-            # Success criteria (adjust as needed)
-            if status < 400:
-                # Additional check: domain should have some content
-                if result.get("size", 0) > 100:  # At least 100 bytes
-                    self.found_domains.append(domain)
-                    print(f"{G}✓ {domain} ({status} - {result['time']:.0f}ms){RST}")
-                    return True
+        # Check ports first (very fast, minimal data)
+        results["http_port"] = self.check_port(host, 80)
+        results["https_port"] = self.check_port(host, 443)
+        
+        # Try HTTP if port 80 is open
+        if results["http_port"]:
+            try:
+                url = f"http://{host}"
+                
+                if HAS_REQUESTS:
+                    response = requests.head(
+                        url,
+                        headers=CONFIG["HEADERS"],
+                        timeout=CONFIG["TIMEOUT"],
+                        allow_redirects=True
+                    )
+                    results["status_code"] = response.status_code
+                    results["final_url"] = str(response.url)
+                    self.data_used += 200  # Approx header size
+                    
+                    # If HEAD successful, try minimal GET
+                    if response.status_code < 500:
+                        response = requests.get(
+                            url,
+                            headers=CONFIG["HEADERS"],
+                            timeout=CONFIG["TIMEOUT"],
+                            stream=True
+                        )
+                        
+                        # Read minimal content
+                        content = b""
+                        for chunk in response.iter_content(chunk_size=1024):
+                            content += chunk
+                            if len(content) >= CONFIG["MAX_DOWNLOAD"]:
+                                break
+                        
+                        results["content_size"] = len(content)
+                        self.data_used += len(content)
+                        response.close()
+                        
                 else:
-                    print(f"{Y}✗ {domain} (no content){RST}")
-            else:
-                print(f"{D}✗ {domain} ({status}){RST}")
-        else:
-            print(f"{D}✗ {domain} (failed){RST}")
+                    # Using urllib
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    
+                    # Try HEAD first
+                    req = urllib.request.Request(url, method='HEAD')
+                    for key, value in CONFIG["HEADERS"].items():
+                        req.add_header(key, value)
+                    
+                    try:
+                        response = urllib.request.urlopen(req, timeout=CONFIG["TIMEOUT"], context=ctx)
+                        results["status_code"] = response.status
+                        results["final_url"] = response.url
+                        self.data_used += 200
+                        
+                        # Try minimal GET
+                        req_get = urllib.request.Request(url)
+                        for key, value in CONFIG["HEADERS"].items():
+                            req_get.add_header(key, value)
+                        
+                        response = urllib.request.urlopen(req_get, timeout=CONFIG["TIMEOUT"], context=ctx)
+                        content = response.read(CONFIG["MAX_DOWNLOAD"])
+                        results["content_size"] = len(content)
+                        self.data_used += len(content)
+                        
+                    except urllib.error.HTTPError as e:
+                        results["status_code"] = e.code
+                        results["final_url"] = e.url
+                        self.data_used += 200
+                        
+                        # Read error page content
+                        try:
+                            content = e.read(1024)
+                            results["content_size"] = len(content)
+                            self.data_used += len(content)
+                        except:
+                            pass
+                            
+            except Exception as e:
+                results["error"] = str(e)
         
-        return False
+        self.total_tested += 1
+        return results
+    
+    def categorize_host(self, result):
+        """Categorize host based on response"""
+        host = result["host"]
+        
+        # If no ports open and no HTTP response
+        if not result["http_port"] and not result["https_port"] and result["status_code"] == 0:
+            return "dead"
+        
+        # Check if it's port-only (no HTTP response but ports open)
+        if (result["http_port"] or result["https_port"]) and result["status_code"] == 0:
+            self.categorized_hosts["port_only"].append(host)
+            return "port_only"
+        
+        # Check content size for categorization
+        size = result["content_size"]
+        status = result["status_code"]
+        
+        if status >= 400 and status < 600:
+            # Error pages but server responded
+            self.categorized_hosts["error_pages"].append({
+                "host": host,
+                "status": status,
+                "size": size
+            })
+            return "error_page"
+        elif size == 0:
+            # Empty response
+            self.categorized_hosts["empty_sites"].append(host)
+            return "empty"
+        elif size < 1024:  # <1KB
+            self.categorized_hosts["small_sites"].append({
+                "host": host,
+                "size": size
+            })
+            return "small"
+        elif size < 5120:  # <5KB
+            self.categorized_hosts["medium_sites"].append({
+                "host": host,
+                "size": size
+            })
+            return "medium"
+        else:  # ≥5KB
+            self.categorized_hosts["full_sites"].append({
+                "host": host,
+                "size": size,
+                "status": status
+            })
+            return "full"
+    
+    def test_host(self, host):
+        """Test a single host and categorize it"""
+        result = self.test_host_minimal(host)
+        
+        category = self.categorize_host(result)
+        
+        # Add to accessible hosts if not dead
+        if category != "dead":
+            self.accessible_hosts.append({
+                "host": host,
+                "category": category,
+                "size": result["content_size"],
+                "status": result["status_code"],
+                "port_80": result["http_port"],
+                "port_443": result["https_port"]
+            })
+            return True, result, category
+        
+        return False, result, category
 
 # ===================== PROGRESS DISPLAY =====================
-def show_progress(current, total, found, data_used, start_time):
+def show_progress(current, total, accessible, start_time, data_used):
     """Show scanning progress"""
     elapsed = time.time() - start_time
     percent = (current / total) * 100
     
-    # Calculate ETA
-    if current > 0:
-        time_per_domain = elapsed / current
-        remaining = total - current
-        eta = time_per_domain * remaining
-        eta_str = f"{int(eta//60)}m {int(eta%60)}s"
-    else:
-        eta_str = "calculating..."
-    
-    # Clear line and print progress
-    sys.stdout.write('\r' + ' ' * 100 + '\r')
-    sys.stdout.write(f"{C}Scanning: {current}/{total} ({percent:.1f}%) | ")
-    sys.stdout.write(f"Found: {found} | ")
+    sys.stdout.write('\r')
+    sys.stdout.write(f"{Colors.CYAN}[*] Progress: {current}/{total} ({percent:.1f}%) | ")
+    sys.stdout.write(f"{Colors.GREEN}Accessible: {accessible}{Colors.RESET} | ")
     sys.stdout.write(f"Data: {data_used/1024:.1f}KB | ")
-    sys.stdout.write(f"ETA: {eta_str}{RST}")
+    sys.stdout.write(f"Time: {elapsed:.1f}s{Colors.RESET}")
     sys.stdout.flush()
 
-# ===================== BANNER =====================
-def show_banner():
-    """Display application banner"""
-    os.system('clear' if os.name == 'posix' else 'cls')
-    
-    banner = f"""{C}{BOLD}
-╔══════════════════════════════════════════════════════════════╗
-║                                                              ║
-║  ██████╗  ██████╗ ██████╗ ███████╗     ███████╗██████╗ ██╗  ║
-║  ██╔══██╗██╔═══██╗██╔══██╗╚══███╔╝     ██╔════╝██╔══██╗██║  ║
-║  ██████╔╝██║   ██║██║  ██║  ███╔╝█████╗███████╗██████╔╝██║  ║
-║  ██╔═══╝ ██║   ██║██║  ██║ ███╔╝ ╚════╝╚════██║██╔═══╝ ██║  ║
-║  ██║     ╚██████╔╝██████╔╝███████╗     ███████║██║     ██║  ║
-║  ╚═╝      ╚═════╝ ╚═════╝ ╚══════╝     ╚══════╝╚═╝     ╚═╝  ║
-║                                                              ║
-║               Z E R O - B A L A N C E   M O D E              ║
-║                Ultra-Low Data Consumption Scanner            ║
-║                                                              ║
-╚══════════════════════════════════════════════════════════════╝{RST}
-"""
-    print(banner)
-
 # ===================== MAIN SCAN FUNCTION =====================
-def start_scanning(domains, resume_index=0):
-    """Start the zero-balance scan"""
-    scanner = ZeroBalanceScanner()
-    total = len(domains)
-    found_count = 0
+def run_host_detection(hosts):
+    """Run host detection scan"""
+    detector = ZeroHostDetector()
+    total = len(hosts)
     start_time = time.time()
     
-    print(f"\n{Y}🚀 STARTING ZERO-BALANCE SCAN{RST}")
-    print(f"{D}─────────────────────────────{RST}")
-    print(f"{W}• Domains to scan: {total}{RST}")
-    print(f"{W}• Max data usage: {CONFIG['MAX_DATA_USAGE']/1024:.1f}KB{RST}")
-    print(f"{W}• Timeout: {CONFIG['TIMEOUT']} seconds{RST}")
-    print(f"{W}• Starting from: #{resume_index + 1}{RST}")
-    
-    input(f"\n{Y}Press ENTER to begin scanning...{RST}")
+    print(f"\n{Colors.YELLOW}[*] Starting host detection on {total} hosts{Colors.RESET}")
+    print(f"{Colors.YELLOW}[*] Using {'requests' if HAS_REQUESTS else 'urllib/socket'}{Colors.RESET}")
+    print(f"{Colors.YELLOW}[*] Detecting ALL responsive hosts (including blank/empty){Colors.RESET}")
     
     try:
-        for i in range(resume_index, total):
-            domain = domains[i]
-            current_number = i + 1
-            
+        for i, host in enumerate(hosts, 1):
             # Show progress
-            stats = scanner.data_counter.get_stats()
-            show_progress(current_number, total, len(scanner.found_domains), 
-                         stats["bytes"], start_time)
+            show_progress(i, total, len(detector.accessible_hosts), start_time, detector.data_used)
             
-            # Scan domain
-            if scanner.scan_domain(domain):
-                found_count += 1
+            # Test host
+            is_accessible, result, category = detector.test_host(host)
             
-            # Save progress every 10 domains
-            if current_number % 10 == 0:
-                ZeroBalanceState.save(domains, current_number, scanner.found_domains)
+            if is_accessible:
+                # Show with appropriate color based on category
+                if category == "full":
+                    print(f"\n{Colors.GREEN}[✓] FULL: {host} ({result['content_size']} bytes){Colors.RESET}")
+                elif category == "medium":
+                    print(f"\n{Colors.BLUE}[~] MEDIUM: {host} ({result['content_size']} bytes){Colors.RESET}")
+                elif category == "small":
+                    print(f"\n{Colors.YELLOW}[.] SMALL: {host} ({result['content_size']} bytes){Colors.RESET}")
+                elif category == "empty":
+                    print(f"\n{Colors.MAGENTA}[0] EMPTY: {host} (empty response){Colors.RESET}")
+                elif category == "error_page":
+                    print(f"\n{Colors.RED}[E] ERROR: {host} ({result['status_code']}){Colors.RESET}")
+                elif category == "port_only":
+                    print(f"\n{Colors.CYAN}[P] PORT: {host} (port open){Colors.RESET}")
+            else:
+                # Dead host
+                print(f"\n{Colors.WHITE}[✗] DEAD: {host}{Colors.RESET}")
             
-            # Check data limit
-            if stats["bytes"] >= CONFIG["MAX_DATA_USAGE"]:
-                print(f"\n\n{R}⚠ DATA LIMIT REACHED!{RST}")
-                print(f"{Y}Used {stats['bytes']/1024:.1f}KB of {CONFIG['MAX_DATA_USAGE']/1024:.1f}KB allowed{RST}")
-                break
+            # Save state every 10 hosts
+            if i % 10 == 0:
+                accessible_list = [h["host"] for h in detector.accessible_hosts]
+                StateManager.save_state(i, accessible_list, total)
             
-            # Small delay to prevent overwhelming
-            time.sleep(0.1)
+            # Small delay
+            time.sleep(0.05)
         
         # Final progress update
-        stats = scanner.data_counter.get_stats()
-        show_progress(total, total, len(scanner.found_domains), 
-                     stats["bytes"], start_time)
-        print()  # New line after progress
+        show_progress(total, total, len(detector.accessible_hosts), start_time, detector.data_used)
+        print()  # New line
         
-        return scanner.found_domains, stats
+        return detector.accessible_hosts, detector.categorized_hosts, detector.data_used
         
     except KeyboardInterrupt:
-        print(f"\n\n{Y}⏸ Scan paused by user{RST}")
-        current_pos = i if 'i' in locals() else resume_index
-        ZeroBalanceState.save(domains, current_pos, scanner.found_domains)
-        print(f"{C}Progress saved. Resume later.{RST}")
-        return scanner.found_domains, scanner.data_counter.get_stats()
+        print(f"\n\n{Colors.YELLOW}[!] Scan interrupted{Colors.RESET}")
+        accessible_list = [h["host"] for h in detector.accessible_hosts]
+        return accessible_list, detector.categorized_hosts, detector.data_used
 
 # ===================== RESULTS DISPLAY =====================
-def show_results(found_domains, stats, total_domains):
-    """Display scan results"""
-    print(f"\n{C}{'═'*60}{RST}")
-    print(f"{G}{BOLD}📊 SCAN COMPLETED{RST}")
-    print(f"{C}{'═'*60}{RST}")
+def show_host_results(accessible_hosts, categorized_hosts, data_used, total_hosts):
+    """Display host detection results"""
+    print(f"\n{Colors.CYAN}{'═'*70}{Colors.RESET}")
+    print(f"{Colors.GREEN}{Colors.BOLD}[*] ZERO-RATED HOST DETECTION COMPLETE{Colors.RESET}")
+    print(f"{Colors.CYAN}{'═'*70}{Colors.RESET}")
     
-    print(f"\n{Y}📈 STATISTICS:{RST}")
-    print(f"  {W}• Domains scanned: {total_domains}{RST}")
-    print(f"  {W}• Active domains found: {len(found_domains)}{RST}")
-    print(f"  {W}• Success rate: {(len(found_domains)/total_domains*100):.1f}%{RST}")
-    print(f"  {W}• Total data used: {stats['bytes']/1024:.2f} KB{RST}")
-    print(f"  {W}• Data per request: {stats['avg_per_request']:.0f} bytes{RST}")
-    print(f"  {W}• Total time: {stats['time']:.1f} seconds{RST}")
-    print(f"  {W}• Requests made: {stats['requests']}{RST}")
+    print(f"\n{Colors.YELLOW}[*] Overall Statistics:{Colors.RESET}")
+    print(f"  Total hosts tested: {total_hosts}")
+    print(f"  Accessible hosts: {len(accessible_hosts)}")
+    print(f"  Data used: {data_used/1024:.1f} KB")
     
-    if found_domains:
-        print(f"\n{G}✅ ACTIVE DOMAINS FOUND:{RST}")
-        for i, domain in enumerate(found_domains[:50], 1):  # Show first 50
-            print(f"  {i:3d}. {domain}")
-        
-        if len(found_domains) > 50:
-            print(f"  {C}... and {len(found_domains) - 50} more{RST}")
-        
-        # Save results
-        with open(CONFIG["RESULTS_FILE"], 'w') as f:
-            for domain in found_domains:
-                f.write(f"{domain}\n")
-        print(f"\n{Y}💾 Results saved to: {CONFIG['RESULTS_FILE']}{RST}")
-    else:
-        print(f"\n{R}❌ No active domains found{RST}")
+    # Show categorized counts
+    print(f"\n{Colors.CYAN}[*] Host Categories:{Colors.RESET}")
+    print(f"  {Colors.GREEN}● Full sites (≥5KB):{Colors.RESET} {len(categorized_hosts['full_sites'])}")
+    print(f"  {Colors.BLUE}● Medium sites (1-5KB):{Colors.RESET} {len(categorized_hosts['medium_sites'])}")
+    print(f"  {Colors.YELLOW}● Small sites (<1KB):{Colors.RESET} {len(categorized_hosts['small_sites'])}")
+    print(f"  {Colors.MAGENTA}● Empty sites:{Colors.RESET} {len(categorized_hosts['empty_sites'])}")
+    print(f"  {Colors.RED}● Error pages:{Colors.RESET} {len(categorized_hosts['error_pages'])}")
+    print(f"  {Colors.CYAN}● Port only (no HTTP):{Colors.RESET} {len(categorized_hosts['port_only'])}")
     
-    print(f"\n{C}{'═'*60}{RST}")
-    print(f"{G}Zero-balance scan completed successfully!{RST}")
-    print(f"{C}{'═'*60}{RST}")
-
-# ===================== RESUME OPTION =====================
-def ask_resume():
-    """Ask user if they want to resume previous scan"""
-    state = ZeroBalanceState.load()
+    # Save all accessible hosts
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    all_hosts_file = f"all_accessible_hosts_{timestamp}.txt"
     
-    if state:
-        print(f"\n{Y}🔄 PREVIOUS SCAN DETECTED{RST}")
-        print(f"{D}─────────────────────────{RST}")
-        print(f"{W}• Progress: {state['current_index']}/{state['total_domains']} domains{RST}")
-        print(f"{W}• Found: {len(state.get('found_domains', []))} active domains{RST}")
-        print(f"{W}• Date: {state['timestamp'][:10]}{RST}")
+    with open(all_hosts_file, 'w') as f:
+        f.write("# All Accessible Hosts (Zero Balance Test)\n")
+        f.write(f"# Generated: {datetime.now().isoformat()}\n")
+        f.write(f"# Total tested: {total_hosts}\n")
+        f.write(f"# Accessible: {len(accessible_hosts)}\n")
+        f.write(f"# Data used: {data_used/1024:.1f} KB\n")
+        f.write("#" * 60 + "\n\n")
         
-        print(f"\n{Y}Do you want to:{RST}")
-        print(f"  1. Resume from last position")
-        print(f"  2. Start new scan")
-        print(f"  3. Delete saved progress")
-        
-        while True:
-            choice = input(f"\n{Y}Enter choice (1-3): {RST}").strip()
+        f.write("ALL ACCESSIBLE HOSTS:\n")
+        f.write("=" * 60 + "\n")
+        for host_info in accessible_hosts:
+            host = host_info["host"]
+            category = host_info["category"]
+            size = host_info.get("size", 0)
+            status = host_info.get("status", 0)
             
-            if choice == '1':
-                return state
-            elif choice == '2':
-                ZeroBalanceState.delete()
-                return None
-            elif choice == '3':
-                ZeroBalanceState.delete()
-                print(f"{G}✓ Progress deleted{RST}")
-                return None
-            else:
-                print(f"{R}Invalid choice. Enter 1, 2, or 3.{RST}")
+            f.write(f"{host}")
+            if status > 0:
+                f.write(f" [HTTP {status}]")
+            if size > 0:
+                f.write(f" ({size} bytes)")
+            f.write(f" - {category.upper()}\n")
     
-    return None
+    print(f"\n{Colors.GREEN}[✓] All accessible hosts saved to: {all_hosts_file}{Colors.RESET}")
+    
+    # Save categorized hosts
+    categories_file = f"host_categories_{timestamp}.txt"
+    
+    with open(categories_file, 'w') as f:
+        f.write("# Host Categories (Zero Balance Test)\n")
+        f.write(f"# Generated: {datetime.now().isoformat()}\n")
+        f.write("#" * 60 + "\n\n")
+        
+        # Full sites
+        if categorized_hosts["full_sites"]:
+            f.write("FULL SITES (≥5KB):\n")
+            f.write("=" * 60 + "\n")
+            for site in categorized_hosts["full_sites"]:
+                f.write(f"{site['host']} ({site['size']} bytes)")
+                if site.get('status'):
+                    f.write(f" [HTTP {site['status']}]")
+                f.write("\n")
+            f.write("\n")
+        
+        # Medium sites
+        if categorized_hosts["medium_sites"]:
+            f.write("MEDIUM SITES (1-5KB):\n")
+            f.write("=" * 60 + "\n")
+            for site in categorized_hosts["medium_sites"]:
+                f.write(f"{site['host']} ({site['size']} bytes)\n")
+            f.write("\n")
+        
+        # Small sites
+        if categorized_hosts["small_sites"]:
+            f.write("SMALL SITES (<1KB):\n")
+            f.write("=" * 60 + "\n")
+            for site in categorized_hosts["small_sites"]:
+                f.write(f"{site['host']} ({site['size']} bytes)\n")
+            f.write("\n")
+        
+        # Empty sites
+        if categorized_hosts["empty_sites"]:
+            f.write("EMPTY/BLANK SITES:\n")
+            f.write("=" * 60 + "\n")
+            for host in categorized_hosts["empty_sites"]:
+                f.write(f"{host}\n")
+            f.write("\n")
+        
+        # Error pages
+        if categorized_hosts["error_pages"]:
+            f.write("ERROR PAGES (but responsive):\n")
+            f.write("=" * 60 + "\n")
+            for error in categorized_hosts["error_pages"]:
+                f.write(f"{error['host']} [HTTP {error['status']}] ({error['size']} bytes)\n")
+            f.write("\n")
+        
+        # Port only
+        if categorized_hosts["port_only"]:
+            f.write("PORT ONLY (no HTTP response):\n")
+            f.write("=" * 60 + "\n")
+            for host in categorized_hosts["port_only"]:
+                f.write(f"{host}\n")
+    
+    print(f"{Colors.GREEN}[✓] Categorized hosts saved to: {categories_file}{Colors.RESET}")
+    
+    # Show sample from each category
+    print(f"\n{Colors.CYAN}[*] Sample Hosts:{Colors.RESET}")
+    
+    # Show 2-3 from each category
+    for category_name, color, display_name in [
+        ("full_sites", Colors.GREEN, "Full Sites"),
+        ("empty_sites", Colors.MAGENTA, "Empty Sites"),
+        ("port_only", Colors.CYAN, "Port Only"),
+        ("error_pages", Colors.RED, "Error Pages")
+    ]:
+        hosts = categorized_hosts[category_name]
+        if hosts:
+            print(f"\n  {color}● {display_name}:{Colors.RESET}")
+            if category_name in ["full_sites", "medium_sites", "small_sites", "error_pages"]:
+                for item in hosts[:3]:
+                    if isinstance(item, dict):
+                        host = item["host"]
+                        size = item.get("size", 0)
+                        status = item.get("status", "")
+                        extra = f" ({size} bytes)"
+                        if status:
+                            extra = f" [HTTP {status}]{extra}"
+                        print(f"    • {host}{extra}")
+            else:
+                for host in hosts[:3]:
+                    print(f"    • {host}")
+    
+    print(f"\n{Colors.YELLOW}[*] Important:{Colors.RESET}")
+    print(f"  • ALL listed hosts are accessible with 0MB balance")
+    print(f"  • 'Empty sites' = potential zero-rated hosts")
+    print(f"  • 'Port only' = servers running but no web service")
+    print(f"  • Test manually to verify zero-rated status")
+    
+    print(f"\n{Colors.CYAN}{'═'*70}{Colors.RESET}")
+
+# ===================== RESUME FUNCTION =====================
+def ask_resume():
+    """Ask if user wants to resume previous scan"""
+    state = StateManager.load_state()
+    
+    if not state:
+        return None, [], 0
+    
+    print(f"\n{Colors.YELLOW}[!] Previous host scan detected{Colors.RESET}")
+    print(f"  Progress: {state['current_index']}/{state['total_hosts']}")
+    print(f"  Accessible hosts: {len(state.get('accessible_hosts', []))}")
+    
+    while True:
+        choice = input(f"\n{Colors.YELLOW}[?] Resume? (y/n/delete): {Colors.RESET}").strip().lower()
+        
+        if choice == 'y':
+            return state['total_hosts'], state.get('accessible_hosts', []), state['current_index']
+        elif choice == 'n':
+            StateManager.clear_state()
+            return None, [], 0
+        elif choice == 'delete':
+            StateManager.clear_state()
+            print(f"{Colors.GREEN}[✓] Previous scan deleted{Colors.RESET}")
+            return None, [], 0
+        else:
+            print(f"{Colors.RED}[!] Invalid choice{Colors.RESET}")
+
+# ===================== ZERO BALANCE CHECK =====================
+def zero_balance_check():
+    """Show zero balance instructions"""
+    print(f"\n{Colors.YELLOW}{'═'*60}{Colors.RESET}")
+    print(f"{Colors.CYAN}{Colors.BOLD}ZERO-RATED HOST CAPTURE MODE{Colors.RESET}")
+    print(f"{Colors.YELLOW}{'═'*60}{Colors.RESET}")
+    
+    print(f"\n{Colors.RED}{Colors.BOLD}⚠ CRITICAL REQUIREMENTS:{Colors.RESET}")
+    print(f"  1. {Colors.RED}Mobile Data: ON{Colors.RESET}")
+    print(f"  2. {Colors.RED}Wi-Fi: OFF{Colors.RESET}")
+    print(f"  3. {Colors.RED}SIM Balance: MUST BE EXACTLY 0MB{Colors.RESET}")
+    print(f"  4. {Colors.RED}Airplane Mode: OFF{Colors.RESET}")
+    
+    print(f"\n{Colors.CYAN}[*] What this detects:{Colors.RESET}")
+    print(f"  • {Colors.GREEN}Full websites{Colors.RESET} (≥5KB)")
+    print(f"  • {Colors.BLUE}Small pages{Colors.RESET} (1-5KB)")
+    print(f"  • {Colors.MAGENTA}Blank/empty pages{Colors.RESET} (<1KB)")
+    print(f"  • {Colors.RED}Error pages{Colors.RESET} (404, 500, etc.)")
+    print(f"  • {Colors.CYAN}Port-only hosts{Colors.RESET} (no web service)")
+    
+    print(f"\n{Colors.GREEN}[*] Why capture everything?{Colors.RESET}")
+    print(f"  • Zero-rated hosts can be ANY size")
+    print(f"  • Some are intentionally blank/empty")
+    print(f"  • Error pages might still be zero-rated")
+    print(f"  • Port access might indicate zero-rated services")
+    
+    print(f"\n{Colors.YELLOW}[!] Data Usage Estimate:{Colors.RESET}")
+    print(f"  • Each host: ~5KB max")
+    print(f"  • 100 hosts: ~500KB")
+    print(f"  • With 0MB balance, only zero-rated will work!")
+    
+    input(f"\n\n{Colors.YELLOW}[?] Press ENTER if balance is 0MB... {Colors.RESET}")
 
 # ===================== MAIN FUNCTION =====================
 def main():
-    """Main program flow"""
-    
-    # Setup signal handler for Ctrl+C
-    def signal_handler(sig, frame):
-        print(f"\n{Y}⚠ Scan interrupted. Saving progress...{RST}")
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    # Show banner
-    show_banner()
-    
-    # Check zero balance mode
-    check_zero_balance_mode()
-    
-    # Ask about resume
-    state = ask_resume()
-    
-    # Get domain file
-    filename, domains = get_domain_file()
-    
-    # Prepare for scanning
-    resume_index = 0
-    found_domains = []
-    
-    if state:
-        resume_index = state["current_index"]
-        found_domains = state.get("found_domains", [])
-        print(f"{G}✓ Resuming from domain #{resume_index + 1}{RST}")
-    
-    # Start scanning
-    found, stats = start_scanning(domains, resume_index)
-    
-    # Combine with previously found domains
-    all_found = list(set(found_domains + found))
-    
-    # Clear state file after successful completion
-    ZeroBalanceState.delete()
-    
-    # Show results
-    show_banner()
-    show_results(all_found, stats, len(domains))
-    
-    # Ask for next action
-    print(f"\n{Y}What would you like to do next?{RST}")
-    print(f"  1. Scan another file")
-    print(f"  2. Exit")
-    
-    while True:
-        choice = input(f"\n{Y}Enter choice (1-2): {RST}").strip()
+    """Main program"""
+    try:
+        # Show banner
+        show_banner()
         
-        if choice == '1':
-            main()  # Restart
-            break
-        elif choice == '2':
-            print(f"\n{G}👋 Thank you for using Podz Sphere Scanner!{RST}")
-            break
+        # Zero balance check
+        zero_balance_check()
+        
+        # Check if we should resume
+        total_from_state, accessible_from_state, start_index = ask_resume()
+        
+        if total_from_state:
+            print(f"{Colors.GREEN}[*] Resuming from position {start_index}{Colors.RESET}")
+            print(f"{Colors.YELLOW}[*] Reloading the same host file...{Colors.RESET}")
+        
+        # Load host file
+        hosts, filename = load_domain_file()
+        if not hosts:
+            print(f"{Colors.RED}[!] No hosts to scan{Colors.RESET}")
+            return
+        
+        # Start scanning
+        if start_index > 0 and start_index < len(hosts):
+            hosts_to_scan = hosts[start_index:]
         else:
-            print(f"{R}Invalid choice.{RST}")
+            hosts_to_scan = hosts
+            accessible_from_state = []
+        
+        # Run host detection
+        accessible_hosts, categorized_hosts, data_used = run_host_detection(hosts_to_scan)
+        
+        # Combine results if resuming
+        all_accessible = []
+        accessible_dict = {h["host"]: h for h in accessible_hosts}
+        
+        # Add resumed hosts
+        for host in accessible_from_state:
+            if host not in accessible_dict:
+                all_accessible.append({
+                    "host": host,
+                    "category": "resumed",
+                    "size": 0,
+                    "status": 0
+                })
+        
+        # Add newly scanned hosts
+        all_accessible.extend(accessible_hosts)
+        
+        # Clear state after successful completion
+        StateManager.clear_state()
+        
+        # Show results
+        show_banner()
+        show_host_results(all_accessible, categorized_hosts, data_used, len(hosts))
+        
+        # Ask for next action
+        print(f"\n{Colors.YELLOW}[?] What next?{Colors.RESET}")
+        print(f"  1. Scan another host list")
+        print(f"  2. Exit")
+        
+        while True:
+            choice = input(f"\n{Colors.YELLOW}[?] Choice (1-2): {Colors.RESET}").strip()
+            
+            if choice == '1':
+                main()
+                break
+            elif choice == '2':
+                print(f"\n{Colors.GREEN}[✓] Zero-rated host capture complete!{Colors.RESET}")
+                print(f"{Colors.CYAN}[*] Check the saved files for all accessible hosts{Colors.RESET}")
+                break
+            else:
+                print(f"{Colors.RED}[!] Enter 1 or 2{Colors.RESET}")
+            
+    except KeyboardInterrupt:
+        print(f"\n\n{Colors.YELLOW}[!] Program interrupted{Colors.RESET}")
+    except Exception as e:
+        print(f"\n{Colors.RED}[!] Error: {e}{Colors.RESET}")
 
 # ===================== ENTRY POINT =====================
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"\n{R}💥 UNEXPECTED ERROR:{RST}")
-        print(f"{Y}{str(e)}{RST}")
-        print(f"\n{D}Please report this issue.{RST}")
-        input(f"\n{Y}Press ENTER to exit...{RST}")
+    # Run main function
+    main()
