@@ -16,7 +16,7 @@ accuracy, simplicity, and real-world ISP behavior.
 
 - Works with **mobile data ON and zero data balance**
 - Designed specifically for **Termux (Android)**
-- Uses a fixed **7-second timeout** per domain
+- Uses a fixed **7-second timeout** per domain/added workers to scan multiple domains at a time
 - Detects **real payload traffic**, not just connectivity
 - Silent scanning — only successful domains are shown
 - Clean, professional terminal UI
